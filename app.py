@@ -468,7 +468,7 @@ def _liste_df(d, secenek=None):
     return df
 
 
-KOMPAKT = ["Karar", "Geri al", "Durum", "Konum", "Fiyat", "m²", "m² fiyat", "Kat", "Yaş", "Çarpan (ay)", "Getiri %",
+KOMPAKT = ["Beğen", "Beklet", "Ele", "Geri", "Geri al", "Durum", "Konum", "Fiyat", "m²", "m² fiyat", "Kat", "Yaş", "Çarpan (ay)", "Getiri %",
            "Kullanım", "İlan", "Neden", "Not"]
 
 
@@ -480,8 +480,10 @@ def _kolon_ayar():
     n = st.column_config.NumberColumn
     t = st.column_config.TextColumn
     return {
-        "Beğen": st.column_config.CheckboxColumn("✔", help="Beğen: 1. elemeyi geçir", width=44, pinned=True),
-        "Ele": st.column_config.CheckboxColumn("✖", help="Ele: istemiyorum", width=44, pinned=True),
+        "Beğen": st.column_config.CheckboxColumn("👍", help="Beğen: listeye al (1. elemeyi geçir)", width=56, pinned=True),
+        "Beklet": st.column_config.CheckboxColumn("⏳", help="Beklet: İncelenenler listesine al", width=56, pinned=True),
+        "Ele": st.column_config.CheckboxColumn("✖", help="Ele: istemiyorum", width=56, pinned=True),
+        "Geri": st.column_config.CheckboxColumn("↩", help="Aday listesine geri gönder", width=56, pinned=True),
         "Kalktı": st.column_config.CheckboxColumn("🗑", help="İlan yayından kalkmış: listeden çıkar", width=44, pinned=True),
         "Geri al": st.column_config.CheckboxColumn("↩", help="Geri al", width=44, pinned=True),
         "Durum": t("Durum", width=82, help="Bölge ortalamasına göre m² fiyat farkı: 🟢 %10+ ucuz · 🟡 normal · 🔴 %10+ pahalı"),
@@ -498,23 +500,12 @@ def _kolon_ayar():
     }
 
 
-KARAR_BEGEN = "👍 Beğen"
-KARAR_BEKLET = "⏳ Beklet"
-KARAR_ELE = "✖ Ele"
-KARAR_KALKTI = "🗑 Yayında değil"
-KARAR_GERI = "↩ Listeye geri al"
-KARAR_HEDEF = {KARAR_BEGEN: dict(asama="birinci", elenen_asama=None), KARAR_BEKLET: dict(asama="beklet", elenen_asama=None),
-               KARAR_ELE: dict(asama="elendi", elenen_asama="aday"), KARAR_KALKTI: dict(asama="elendi", elenen_asama=KALKTI),
-               KARAR_GERI: dict(asama="aday", elenen_asama=None)}
-
-
-def _karar_kolon(secenekler):
-    return st.column_config.SelectboxColumn("Karar", options=secenekler, width=125, pinned=True,
-                                            help="👍 Beğen: 1. elemeyi geçir · ⏳ Beklet: İncelenenler listesine al · ✖ Ele · 🗑 İlan yayından kalkmış")
+KARAR_HEDEF = {"Beğen": dict(asama="birinci", elenen_asama=None), "Beklet": dict(asama="beklet", elenen_asama=None),
+               "Ele": dict(asama="elendi", elenen_asama="aday"), "Geri": dict(asama="aday", elenen_asama=None)}
 
 
 def _karar_degisti(anahtar, ids_anahtar, ver_anahtar):
-    """Tablodaki karar/not değişikliği: veritabanına yazar, satır anında listeden düşer."""
+    """Tablodaki 👍 ⏳ ✖ tıklaması / not değişikliği: veritabanına yazar, satır anında listeden düşer."""
     ids = st.session_state.get(ids_anahtar, [])
     ed = st.session_state.get(anahtar, {}).get("edited_rows", {})
     gruplar, notlar = {}, {}
@@ -522,10 +513,10 @@ def _karar_degisti(anahtar, ids_anahtar, ver_anahtar):
         if int(pos) >= len(ids):
             continue
         i = ids[int(pos)]
-        k = ch.get("Karar")
-        if k in KARAR_HEDEF:
-            gruplar.setdefault(k, []).append(i)
-        if "Not" in ch and k not in (KARAR_ELE, KARAR_KALKTI):
+        secilen = [k for k in ("Ele", "Beklet", "Beğen", "Geri") if ch.get(k)]
+        if secilen:
+            gruplar.setdefault(secilen[0], []).append(i)
+        if "Not" in ch and not (secilen and secilen[0] == "Ele"):
             notlar[i] = (ch["Not"] or "").strip() or None
     try:
         for k, liste in gruplar.items():
@@ -566,17 +557,17 @@ def _sekme_birinci(sat, dosya):
     else:
         d, sig = _filtre_df(aday, "b1")
         st.caption(f"{len(d)} / {len(aday)} ilan · {int(d['aykiri'].sum())} aykırı fiyatlı (bölge ortalamasına girmez). "
-                   "**Karar** sütunundan seç: 👍 beğen (listeye al) · ⏳ beklet (İncelenenler'e geçer) · ✖ ele · 🗑 yayında değil. "
-                   "Seçtiğin anda kaydedilir ve satır bu listeden çıkar.")
+                   "**👍 beğen** (listeye al) · **⏳ beklet** (İncelenenler'e geçer) · **✖ ele**: tıkladığın anda kaydedilir ve satır bu listeden çıkar.")
         ed = _liste_df(d, None)
         ed["Not"] = d["not_metni"].fillna("").values
-        ed.insert(0, "Karar", None)
+        ed.insert(0, "Ele", False)
+        ed.insert(0, "Beklet", False)
+        ed.insert(0, "Beğen", False)
         st.session_state["_b1_ids"] = [int(i) for i in ed.index]
         anahtar = f"ed_b1_{dosya['id']}_{ver}"
         detay = st.toggle("Ayrıntılı sütunlar", key="b1_detay")
-        cfg = {**_kolon_ayar(), "Karar": _karar_kolon([KARAR_BEGEN, KARAR_BEKLET, KARAR_ELE, KARAR_KALKTI])}
-        st.data_editor(ed, column_config=cfg, column_order=_sutun_sirasi(ed.columns, detay),
-                       disabled=[c for c in ed.columns if c not in ("Karar", "Not")],
+        st.data_editor(ed, column_config=_kolon_ayar(), column_order=_sutun_sirasi(ed.columns, detay),
+                       disabled=[c for c in ed.columns if c not in ("Beğen", "Beklet", "Ele", "Not")],
                        hide_index=True, use_container_width=True, height=min(560, 44 + 35 * len(ed)), row_height=35, key=anahtar,
                        on_change=_karar_degisti, args=(anahtar, "_b1_ids", "_b1_ver"))
     elen = sat[sat["asama"] == "elendi"]
@@ -606,16 +597,17 @@ def _sekme_incelenen(sat, dosya):
         st.info("İncelenen ilan yok. 1. Eleme'de bir ilanı '⏳ Beklet' dersen burada toplanır.")
         return
     d, sig = _filtre_df(bek, "bk", acik=False)
-    st.caption(f"{len(d)} / {len(bek)} ilan · **Karar:** 👍 beğen (1. elemeyi geçir) · ↩ aday listesine geri al · ✖ ele · 🗑 yayında değil")
+    st.caption(f"{len(d)} / {len(bek)} ilan · **👍 beğen** (1. elemeyi geçir) · **↩ geri** (aday listesine döner) · **✖ ele**")
     ed = _liste_df(d, None)
     ed["Not"] = d["not_metni"].fillna("").values
-    ed.insert(0, "Karar", None)
+    ed.insert(0, "Ele", False)
+    ed.insert(0, "Geri", False)
+    ed.insert(0, "Beğen", False)
     st.session_state["_bk_ids"] = [int(i) for i in ed.index]
     anahtar = f"ed_bk_{dosya['id']}_{ver}"
     detay = st.toggle("Ayrıntılı sütunlar", key="bk_detay")
-    cfg = {**_kolon_ayar(), "Karar": _karar_kolon([KARAR_BEGEN, KARAR_GERI, KARAR_ELE, KARAR_KALKTI])}
-    st.data_editor(ed, column_config=cfg, column_order=_sutun_sirasi(ed.columns, detay),
-                   disabled=[c for c in ed.columns if c not in ("Karar", "Not")],
+    st.data_editor(ed, column_config=_kolon_ayar(), column_order=_sutun_sirasi(ed.columns, detay),
+                   disabled=[c for c in ed.columns if c not in ("Beğen", "Geri", "Ele", "Not")],
                    hide_index=True, use_container_width=True, height=min(560, 44 + 35 * len(ed)), row_height=35, key=anahtar,
                    on_change=_karar_degisti, args=(anahtar, "_bk_ids", "_bk_ver"))
 
@@ -662,15 +654,10 @@ def _sekme_gorusme(sat):
                 kiraci = c.selectbox("Kiracı durumu", KIRACI, index=KIRACI.index(g.get("kiraci")) if g.get("kiraci") in KIRACI else 0)
                 neden = st.text_input("Satış nedeni", g.get("neden") or "")
                 notlar = st.text_area("Notlar", g.get("notlar") or "", height=80)
-                b1, b2, b3, b4 = st.columns(4)
+                b1, b2, b3 = st.columns(3)
                 kaydet = b1.form_submit_button("Kaydet")
                 ikinci = b2.form_submit_button("Kaydet ve 2. elemeye al", type="primary")
-                ele = b3.form_submit_button("Ele")
-                kalkti = b4.form_submit_button("🗑 Yayından kalktı")
-            if kalkti:
-                _ilan_guncelle(r["id"], asama="elendi", elenen_asama=KALKTI)
-                st.session_state["_mesaj"] = "İlan yayından kalktı olarak listeden çıkarıldı."
-                st.rerun()
+                ele = b3.form_submit_button("✖ Ele")
             if kaydet or ikinci or ele:
                 yeni = {"danisman_adi": dan or None, "danisman_tel": tel or None, "tarih": tarih.isoformat(), "net_fiyat": net or None,
                         "kira": kira or None, "aidat": aidat or None, "tapu": tapu or None, "kredi": kredi or None,
