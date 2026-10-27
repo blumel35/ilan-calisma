@@ -70,3 +70,9 @@ def adaylari_sil(dosya_id, tur=None):
     if tur:
         q = q.eq("tur", tur)
     q.execute()
+
+
+def ilan_toplu_guncelle(ilan_idleri, alanlar):
+    ids = [int(i) for i in ilan_idleri]
+    for i in range(0, len(ids), 200):
+        _istemci().table("ilanlar").update(alanlar).in_("id", ids[i:i + 200]).execute()

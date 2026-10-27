@@ -19,6 +19,7 @@ TAPU = ["", "Kat mülkiyeti", "Kat irtifakı", "Hisseli", "Arsa / müstakil", "D
 KREDI = ["", "Uygun", "Uygun değil", "Bilinmiyor"]
 KIRACI = ["", "Boş", "Kiracılı", "Mülk sahibi oturuyor"]
 FINAL_SAYISI = 3
+KALKTI = "kalkti"   # elenen_asama değeri: ilan yayından kalkmış
 
 SIRALAMA = {
     "Bölge ortalamasına göre en ucuz": ("fark_pct", True),
@@ -174,11 +175,25 @@ def _sekme_veri(dosya, df):
                 + (f" · {r['atlanan']} satır eksik veri nedeniyle atlandı" if r["atlanan"] else "")
                 + (f" · {r['tekrar']} tekrar" if r["tekrar"] else ""))
         parcalar.append(d)
+    kalkan = pd.DataFrame()
+    if parcalar and not df.empty:
+        yeni_url = pd.concat(parcalar).groupby("tur")["url"].apply(set).to_dict()
+        kalkan = pd.concat([df[(df["tur"] == t) & (df["asama"] != "elendi") & (~df["url"].isin(u))] for t, u in yeni_url.items()])
+    kalkan_sil = False
+    if len(kalkan):
+        say = kalkan["asama"].map(ASAMA_AD).value_counts().to_dict()
+        st.warning(f"Dosyada olup bu yeni listede olmayan {len(kalkan)} ilan var, yayından kalkmış olabilir "
+                   f"({', '.join(f'{k}: {v}' for k, v in say.items())}).")
+        kalkan_sil = st.checkbox("Bunları 'yayından kalktı' say ve listelerden çıkar (Elenenler bölümünden geri alınabilir)",
+                                 value=True, key="kalkan_sil",
+                                 help="Yeni liste farklı bir kriterle alındıysa bu kutuyu kapat.")
     if parcalar and st.button("Müşteri dosyasına ekle", type="primary", key="ekle"):
         tum = pd.concat(parcalar).drop_duplicates(subset=["tur", "url"], keep="last")
         n = db.ilanlar_yaz(dosya["id"], tum)
+        if kalkan_sil and len(kalkan):
+            db.ilan_toplu_guncelle(list(kalkan["id"]), {"asama": "elendi", "elenen_asama": KALKTI, "guncelleme": _simdi()})
         st.session_state["up_n"] = st.session_state.get("up_n", 0) + 1
-        st.session_state["_mesaj"] = f"{n} ilan eklendi/güncellendi."
+        st.session_state["_mesaj"] = f"{n} ilan eklendi/güncellendi." + (f" {len(kalkan)} ilan yayından kalktı olarak çıkarıldı." if kalkan_sil and len(kalkan) else "")
         _yenile()
         st.rerun()
 
@@ -256,7 +271,7 @@ def _kat_tipi(v):
     s = hesap.tr_kucuk(v)
     if not s:
         return ""
-    if "çatı" in s or "cati" in s:
+    if "çatı" in s or "cati" in s or "teras" in s:
         return "cati"
     if any(x in s for x in ("zemin", "giriş", "bahçe", "bodrum", "kot", "yüksek giriş")):
         return "zemin"
@@ -281,7 +296,8 @@ def _filtre_df(sat, anahtar):
         kul = c[3].multiselect("Kullanım durumu", sorted(sat["kullanim"].dropna().unique()), key=f"{anahtar}_kul")
 
         c = st.columns([2, 2, 3])
-        cati = c[0].checkbox("Çatı katlarını gizle", value=True, key=f"{anahtar}_cati")
+        cati = c[0].checkbox("Çatı / en üst katları gizle", value=True, key=f"{anahtar}_cati",
+                             help="'Çatı' yazanlar ve kat numarası binanın kat sayısına eşit olanlar (3 katlı binanın 3. katı gibi)")
         zemin = c[1].checkbox("Zemin / giriş / bahçe / bodrum katlarını gizle", value=True, key=f"{anahtar}_zemin")
         katlar = sorted(sat["kat"].dropna().astype(str).unique(), key=lambda x: (not x.split(".")[0].isdigit(), int(x.split(".")[0]) if x.split(".")[0].isdigit() else 0, x))
         kat_gizle = c[2].multiselect("Başka kat(lar)ı gizle", katlar, key=f"{anahtar}_katg")
@@ -318,8 +334,10 @@ def _filtre_df(sat, anahtar):
         sat = sat[yeni] if bina[0].startswith("Yeni") else sat[eski]
     tip = sat["kat"].map(_kat_tipi)
     if cati:
-        sat = sat[tip != "cati"]
-        tip = tip[tip != "cati"]
+        kat_no = pd.to_numeric(sat["kat"].astype(str).str.extract(r"^(\d+)\.")[0], errors="coerce")
+        ust = (kat_no == sat["toplam_kat"]) & (sat["toplam_kat"] >= 2)      # 3 katlı binanın 3. katı gibi
+        sat = sat[(tip != "cati") & ~ust]
+        tip = tip[(tip != "cati") & ~ust]
     if zemin:
         sat = sat[tip != "zemin"]
     if kat_gizle:
@@ -381,6 +399,8 @@ def _kolon_ayar():
         "Ofis / ilan sahibi": st.column_config.TextColumn("Ofis", width=140), "Kaynak": st.column_config.TextColumn(width=90),
         "Not": st.column_config.TextColumn("Not", width=200),
         "Geri al": st.column_config.CheckboxColumn("↩", help="Geri al", width=50),
+        "Kalktı": st.column_config.CheckboxColumn("🗑", help="İlan yayından kalkmış: listeden çıkar", width=50, pinned=True),
+        "Neden": st.column_config.TextColumn(width=110),
     }
 
 
@@ -394,25 +414,30 @@ def _sekme_birinci(sat, dosya):
                    "Beğendiklerini ✔, istemediklerini ✖ ile işaretle, sonra Kaydet.")
         ed = _liste_df(d, None)
         ed["Not"] = d["not_metni"].fillna("").values
+        ed.insert(0, "Kalktı", False)
         ed.insert(0, "Ele", False)
         ed.insert(0, "Beğen", False)
-        disabled = [c for c in ed.columns if c not in ("Beğen", "Ele", "Not")]
+        disabled = [c for c in ed.columns if c not in ("Beğen", "Ele", "Kalktı", "Not")]
         son = st.data_editor(ed, column_config=_kolon_ayar(), disabled=disabled, hide_index=True, use_container_width=True,
                              height=560, key=f"ed_b1_{hash(sig)}_{len(ed)}")
         c1, c2 = st.columns([1, 4])
         if c1.button("Kaydet", type="primary", key="b1_kaydet"):
-            cift = son.index[son["Beğen"] & son["Ele"]]
+            cift = son.index[(son[["Beğen", "Ele", "Kalktı"]].sum(axis=1) > 1)]
             if len(cift):
-                st.error(f"{len(cift)} ilanda hem Beğen hem Ele işaretli, birini kaldır.")
+                st.error(f"{len(cift)} ilanda birden fazla işaret var (Beğen / Ele / Kalktı), birini bırak.")
             else:
                 n = 0
+                kalkti = list(son.index[son["Kalktı"]])
+                if kalkti:
+                    db.ilan_toplu_guncelle(kalkti, {"asama": "elendi", "elenen_asama": KALKTI, "guncelleme": _simdi()})
+                    n += len(kalkti)
                 for i in son.index[son["Beğen"]]:
                     _ilan_guncelle(i, asama="birinci", not_metni=son.at[i, "Not"] or None)
                     n += 1
                 for i in son.index[son["Ele"]]:
                     _ilan_guncelle(i, asama="elendi", elenen_asama="aday", not_metni=son.at[i, "Not"] or None)
                     n += 1
-                for i in son.index[~son["Beğen"] & ~son["Ele"]]:
+                for i in son.index[~son["Beğen"] & ~son["Ele"] & ~son["Kalktı"]]:
                     if (son.at[i, "Not"] or "") != (ed.at[i, "Not"] or ""):
                         _ilan_guncelle(i, not_metni=son.at[i, "Not"] or None)
                         n += 1
@@ -423,6 +448,7 @@ def _sekme_birinci(sat, dosya):
     if not elen.empty:
         with st.expander(f"Elenenler ({len(elen)})"):
             ed2 = _liste_df(elen, None)
+            ed2["Neden"] = elen["elenen_asama"].map(lambda x: "Yayından kalktı" if x == KALKTI else "Elendi").values
             ed2["Not"] = elen["not_metni"].fillna("").values
             ed2.insert(0, "Geri al", False)
             s2 = st.data_editor(ed2, column_config=_kolon_ayar(),
@@ -478,10 +504,16 @@ def _sekme_gorusme(sat):
                 kiraci = c.selectbox("Kiracı durumu", KIRACI, index=KIRACI.index(g.get("kiraci")) if g.get("kiraci") in KIRACI else 0)
                 neden = st.text_input("Satış nedeni", g.get("neden") or "")
                 notlar = st.text_area("Notlar", g.get("notlar") or "", height=80)
-                b1, b2, b3 = st.columns(3)
+                b1, b2, b3, b4 = st.columns(4)
                 kaydet = b1.form_submit_button("Kaydet")
                 ikinci = b2.form_submit_button("Kaydet ve 2. elemeye al", type="primary")
                 ele = b3.form_submit_button("Ele")
+                kalkti = b4.form_submit_button("🗑 Yayından kalktı")
+            if kalkti:
+                _ilan_guncelle(r["id"], asama="elendi", elenen_asama=KALKTI)
+                st.session_state["_mesaj"] = "İlan yayından kalktı olarak listeden çıkarıldı."
+                _yenile()
+                st.rerun()
             if kaydet or ikinci or ele:
                 yeni = {"danisman_adi": dan or None, "danisman_tel": tel or None, "tarih": tarih.isoformat(), "net_fiyat": net or None,
                         "kira": kira or None, "aidat": aidat or None, "tapu": tapu or None, "kredi": kredi or None,
