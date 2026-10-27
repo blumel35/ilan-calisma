@@ -52,7 +52,9 @@ def _giris():
 
 # ── Veri ───────────────────────────────────────────────────────────────
 def _yenile():
+    """Veri değişti (yükleme/temizleme/silme): her şeyi yeniden oku ve hesapla."""
     st.session_state["v"] = st.session_state.get("v", 0) + 1
+    st.session_state.pop("durum", None)
     _yukle.clear()
     _hesap.clear()
 
@@ -68,17 +70,63 @@ def _hesap(dosya_id, v, mn_s, mn_k, k):
     if df.empty or "tur" not in df:
         bos = pd.DataFrame()
         return bos, bos, bos
-    sat, kira, oz = hesap.hesapla(df, mn_s, mn_k, k)
-    return hesap.net_hesapla(sat), kira, oz
+    return hesap.hesapla(df, mn_s, mn_k, k)
+
+
+@st.cache_data(ttl=300)
+def _dosyalar(n):
+    return db.dosyalar()
+
+
+def _dosyalar_yenile():
+    st.session_state["dn"] = st.session_state.get("dn", 0) + 1
+
+
+DURUM_KOL = ["asama", "elenen_asama", "not_metni", "gorusme"]
+
+
+def _durum_hazir(dosya_id, v, df):
+    """Eleme durumu (aşama, not, görüşme) oturumda tutulur: tıklamada veritabanı yazılır, ekran anında güncellenir."""
+    d = st.session_state.get("durum")
+    if d and d["dosya"] == dosya_id and d["v"] == v:
+        return
+    m = {}
+    if not df.empty:
+        m = df.set_index("id")[DURUM_KOL].to_dict("index")
+    st.session_state["durum"] = {"dosya": dosya_id, "v": v, "map": m}
+
+
+def _uygula(d):
+    """Hesap tablosuna güncel eleme durumunu işler."""
+    if d is None or d.empty:
+        return d
+    m = st.session_state["durum"]["map"]
+    d = d.copy()
+    for c in DURUM_KOL:
+        d[c] = pd.Series([m.get(i, {}).get(c) for i in d["id"]], index=d.index, dtype=object)
+    return d
 
 
 def _simdi():
     return datetime.now(timezone.utc).isoformat()
 
 
+def _guncelle(ids, **alan):
+    ids = [int(i) for i in ids]
+    if not ids:
+        return
+    yaz = {**alan, "guncelleme": _simdi()}
+    if len(ids) == 1:
+        db.ilan_guncelle(ids[0], yaz)
+    else:
+        db.ilan_toplu_guncelle(ids, yaz)
+    m = st.session_state["durum"]["map"]
+    for i in ids:
+        m.setdefault(i, {}).update({k: v for k, v in alan.items() if k in DURUM_KOL})
+
+
 def _ilan_guncelle(ilan_id, **alanlar):
-    alanlar["guncelleme"] = _simdi()
-    db.ilan_guncelle(ilan_id, alanlar)
+    _guncelle([ilan_id], **alanlar)
 
 
 def _mesaj():
@@ -102,13 +150,14 @@ def _yeni_dosya_kaydet():
         "butce_min": st.session_state.get("yd_bmin") or None, "butce_max": st.session_state.get("yd_bmax") or None,
         "bolgeler": st.session_state.get("yd_bolge") or None, "notlar": st.session_state.get("yd_not") or None,
     })
+    _dosyalar_yenile()
     if r:
         st.session_state["dosya_sec"] = r["id"]
         st.session_state["_mesaj"] = f"'{ad}' dosyası oluşturuldu. Veri sekmesinden Revy Excel'ini yükleyebilirsin."
 
 
 def _kenar_cubugu():
-    dos = db.dosyalar()
+    dos = _dosyalar(st.session_state.get('dn', 0))
     st.sidebar.title("🗂️ İlan Çalışma Alanı")
     with st.sidebar.expander("➕ Yeni müşteri dosyası", expanded=not dos):
         with st.form("yeni_dosya", clear_on_submit=True):
@@ -210,6 +259,7 @@ def _sekme_veri(dosya, df):
             if st.form_submit_button("Kaydet"):
                 db.dosya_guncelle(dosya["id"], {"ad": ad.strip() or dosya["ad"], "telefon": tel or None, "hedef": hedef or None,
                                                 "butce_min": bmin or None, "butce_max": bmax or None, "bolgeler": bol or None, "notlar": nt or None})
+                _dosyalar_yenile()
                 st.session_state["_mesaj"] = "Müşteri bilgileri kaydedildi."
                 st.rerun()
     with st.expander("Listeyi temizle / dosyayı sil"):
@@ -224,6 +274,7 @@ def _sekme_veri(dosya, df):
         onay = st.checkbox("Bu müşteri dosyasını ve tüm ilanlarını kalıcı olarak silmek istiyorum", key="sil_onay")
         if st.button("Dosyayı sil", disabled=not onay, key="sil"):
             db.dosya_sil(dosya["id"])
+            _dosyalar_yenile()
             st.session_state.pop("dosya_sec", None)
             _yenile()
             st.rerun()
@@ -404,46 +455,74 @@ def _kolon_ayar():
     }
 
 
+def _b1_degisti(anahtar):
+    """Tablodaki işaretleme/not değişikliği: veritabanına yazar, satır anında listeden düşer."""
+    ids = st.session_state.get("_b1_ids", [])
+    ed = st.session_state.get(anahtar, {}).get("edited_rows", {})
+    kalkti, ele, begen, notlar = [], [], [], {}
+    for pos, ch in ed.items():
+        if int(pos) >= len(ids):
+            continue
+        i = ids[int(pos)]
+        if ch.get("Kalktı"):
+            kalkti.append(i)
+        elif ch.get("Ele"):
+            ele.append(i)
+        elif ch.get("Beğen"):
+            begen.append(i)
+        if "Not" in ch and not (ch.get("Kalktı") or ch.get("Ele")):
+            notlar[i] = (ch["Not"] or "").strip() or None
+    try:
+        _guncelle(kalkti, asama="elendi", elenen_asama=KALKTI)
+        _guncelle(ele, asama="elendi", elenen_asama="aday")
+        _guncelle(begen, asama="birinci")
+        for i, n in notlar.items():
+            _guncelle([i], not_metni=n)
+    except Exception as e:      # noqa: BLE001
+        st.session_state["_b1_hata"] = str(e)
+    st.session_state["_b1_ver"] = st.session_state.get("_b1_ver", 0) + 1
+
+
+def _b1_geri(anahtar):
+    ids = st.session_state.get("_b1_elen_ids", [])
+    ed = st.session_state.get(anahtar, {}).get("edited_rows", {})
+    m = st.session_state["durum"]["map"]
+    try:
+        for pos, ch in ed.items():
+            if ch.get("Geri al") and int(pos) < len(ids):
+                i = ids[int(pos)]
+                onceki = m.get(i, {}).get("elenen_asama")
+                _guncelle([i], asama=onceki if onceki in ("aday", "birinci") else "aday", elenen_asama=None)
+    except Exception as e:      # noqa: BLE001
+        st.session_state["_b1_hata"] = str(e)
+    st.session_state["_b1_ver"] = st.session_state.get("_b1_ver", 0) + 1
+
+
+@st.fragment
 def _sekme_birinci(sat, dosya):
+    """Fragment: bu bölümdeki her tıklama yalnız bu bölümü yeniler (tüm uygulamayı değil)."""
+    sat = _uygula(sat)
+    hata = st.session_state.pop("_b1_hata", None)
+    if hata:
+        st.error(f"Kaydedilemedi: {hata}")
+    ver = st.session_state.get("_b1_ver", 0)
     aday = sat[sat["asama"] == "aday"]
     if aday.empty:
         st.info("Aday ilan yok. Veri sekmesinden Revy listesini yükle ya da elenenleri geri al.")
     else:
         d, sig = _filtre_df(aday, "b1")
         st.caption(f"{len(d)} / {len(aday)} ilan · {int(d['aykiri'].sum())} aykırı fiyatlı (bölge ortalamasına girmez). "
-                   "Beğendiklerini ✔, istemediklerini ✖ ile işaretle, sonra Kaydet.")
+                   "✔ beğen, ✖ ele, 🗑 yayından kalkmış: işaretlediğin anda kaydedilir ve satır listeden çıkar.")
         ed = _liste_df(d, None)
         ed["Not"] = d["not_metni"].fillna("").values
         ed.insert(0, "Kalktı", False)
         ed.insert(0, "Ele", False)
         ed.insert(0, "Beğen", False)
-        disabled = [c for c in ed.columns if c not in ("Beğen", "Ele", "Kalktı", "Not")]
-        son = st.data_editor(ed, column_config=_kolon_ayar(), disabled=disabled, hide_index=True, use_container_width=True,
-                             height=560, key=f"ed_b1_{hash(sig)}_{len(ed)}")
-        c1, c2 = st.columns([1, 4])
-        if c1.button("Kaydet", type="primary", key="b1_kaydet"):
-            cift = son.index[(son[["Beğen", "Ele", "Kalktı"]].sum(axis=1) > 1)]
-            if len(cift):
-                st.error(f"{len(cift)} ilanda birden fazla işaret var (Beğen / Ele / Kalktı), birini bırak.")
-            else:
-                n = 0
-                kalkti = list(son.index[son["Kalktı"]])
-                if kalkti:
-                    db.ilan_toplu_guncelle(kalkti, {"asama": "elendi", "elenen_asama": KALKTI, "guncelleme": _simdi()})
-                    n += len(kalkti)
-                for i in son.index[son["Beğen"]]:
-                    _ilan_guncelle(i, asama="birinci", not_metni=son.at[i, "Not"] or None)
-                    n += 1
-                for i in son.index[son["Ele"]]:
-                    _ilan_guncelle(i, asama="elendi", elenen_asama="aday", not_metni=son.at[i, "Not"] or None)
-                    n += 1
-                for i in son.index[~son["Beğen"] & ~son["Ele"] & ~son["Kalktı"]]:
-                    if (son.at[i, "Not"] or "") != (ed.at[i, "Not"] or ""):
-                        _ilan_guncelle(i, not_metni=son.at[i, "Not"] or None)
-                        n += 1
-                st.session_state["_mesaj"] = f"{n} ilan güncellendi."
-                _yenile()
-                st.rerun()
+        st.session_state["_b1_ids"] = [int(i) for i in ed.index]
+        anahtar = f"ed_b1_{dosya['id']}_{ver}"
+        st.data_editor(ed, column_config=_kolon_ayar(), disabled=[c for c in ed.columns if c not in ("Beğen", "Ele", "Kalktı", "Not")],
+                       hide_index=True, use_container_width=True, height=560, key=anahtar,
+                       on_change=_b1_degisti, args=(anahtar,))
     elen = sat[sat["asama"] == "elendi"]
     if not elen.empty:
         with st.expander(f"Elenenler ({len(elen)})"):
@@ -451,15 +530,10 @@ def _sekme_birinci(sat, dosya):
             ed2["Neden"] = elen["elenen_asama"].map(lambda x: "Yayından kalktı" if x == KALKTI else "Elendi").values
             ed2["Not"] = elen["not_metni"].fillna("").values
             ed2.insert(0, "Geri al", False)
-            s2 = st.data_editor(ed2, column_config=_kolon_ayar(),
-                                disabled=[c for c in ed2.columns if c != "Geri al"], hide_index=True, use_container_width=True,
-                                key=f"ed_elen_{len(ed2)}")
-            if st.button("Seçilenleri geri al", key="geri_al"):
-                for i in s2.index[s2["Geri al"]]:
-                    onceki = elen.loc[elen["id"] == i, "elenen_asama"].iloc[0]
-                    _ilan_guncelle(i, asama=onceki if onceki in ("aday", "birinci") else "aday", elenen_asama=None)
-                _yenile()
-                st.rerun()
+            st.session_state["_b1_elen_ids"] = [int(i) for i in ed2.index]
+            anahtar2 = f"ed_elen_{dosya['id']}_{ver}"
+            st.data_editor(ed2, column_config=_kolon_ayar(), disabled=[c for c in ed2.columns if c != "Geri al"],
+                           hide_index=True, use_container_width=True, key=anahtar2, on_change=_b1_geri, args=(anahtar2,))
 
 
 # ── Sekme: Danışman görüşmesi ──────────────────────────────────────────
@@ -512,7 +586,6 @@ def _sekme_gorusme(sat):
             if kalkti:
                 _ilan_guncelle(r["id"], asama="elendi", elenen_asama=KALKTI)
                 st.session_state["_mesaj"] = "İlan yayından kalktı olarak listeden çıkarıldı."
-                _yenile()
                 st.rerun()
             if kaydet or ikinci or ele:
                 yeni = {"danisman_adi": dan or None, "danisman_tel": tel or None, "tarih": tarih.isoformat(), "net_fiyat": net or None,
@@ -525,7 +598,6 @@ def _sekme_gorusme(sat):
                     alan.update(asama="elendi", elenen_asama="birinci")
                 _ilan_guncelle(r["id"], **alan)
                 st.session_state["_mesaj"] = "Görüşme kaydedildi." + (" İlan 2. elemeye alındı." if ikinci else " İlan elendi." if ele else "")
-                _yenile()
                 st.rerun()
 
 
@@ -579,7 +651,6 @@ def _sekme_ikinci(sat):
                 _ilan_guncelle(i, asama="elendi", elenen_asama="ikinci")
             for i in son.index[son["Geri"]]:
                 _ilan_guncelle(i, asama="birinci")
-            _yenile()
             st.rerun()
 
 
@@ -602,7 +673,6 @@ def _sekme_final(dosya, sat, oz):
                     st.link_button("İlanı aç", r["url"])
                     if st.button("Final'den çıkar", key=f"fc_{r['id']}"):
                         _ilan_guncelle(r["id"], asama="ikinci")
-                        _yenile()
                         st.rerun()
         st.divider()
         dn = st.checkbox("Sunum sayfasına danışman bilgisi ve notları ekle", key="sunum_dan")
@@ -616,6 +686,9 @@ def _sekme_final(dosya, sat, oz):
 
 
 # ── Ana akış ───────────────────────────────────────────────────────────
+BOLUMLER = ["veri", "ozet", "b1", "gor", "b2", "final"]
+
+
 def main():
     _giris()
     dosya, mn_s, mn_k, k = _kenar_cubugu()
@@ -623,24 +696,32 @@ def main():
     v = st.session_state.get("v", 0)
     df = _yukle(dosya["id"], v)
     sat, kira, oz = _hesap(dosya["id"], v, mn_s, mn_k, k)
-    t = st.tabs(["📥 Veri", "📊 Bölge özeti", "1️⃣ 1. Eleme", "📞 Danışman görüşmesi", "2️⃣ 2. Eleme", "⭐ Final 3"])
-    with t[0]:
-        _sekme_veri(dosya, df)
-    if sat.empty:
-        for i in range(1, 6):
-            with t[i]:
-                st.info("Önce Veri sekmesinden Revy ilan listesini yükle.")
+    _durum_hazir(dosya["id"], v, df)
+    dfd = _uygula(df)
+    say = dfd[dfd["tur"] == "satilik"]["asama"].value_counts().to_dict() if not dfd.empty else {}
+    ad = {"veri": "📥 Veri", "ozet": "📊 Bölge özeti", "b1": f"1️⃣ 1. Eleme ({say.get('aday', 0)})",
+          "gor": f"📞 Danışman görüşmesi ({say.get('birinci', 0)})", "b2": f"2️⃣ 2. Eleme ({say.get('ikinci', 0)})",
+          "final": f"⭐ Final ({say.get('final', 0)})"}
+    bolum = st.radio("Bölüm", BOLUMLER, format_func=ad.get, horizontal=True, key="bolum", label_visibility="collapsed")
+    st.divider()
+    if bolum == "veri":
+        _sekme_veri(dosya, dfd)
         return
-    with t[1]:
+    if sat.empty:
+        st.info("Önce Veri bölümünden Revy ilan listesini yükle.")
+        return
+    if bolum == "ozet":
         _sekme_ozet(oz, mn_s, mn_k)
-    with t[2]:
+    elif bolum == "b1":
         _sekme_birinci(sat, dosya)
-    with t[3]:
-        _sekme_gorusme(sat)
-    with t[4]:
-        _sekme_ikinci(sat)
-    with t[5]:
-        _sekme_final(dosya, sat, oz)
+    else:
+        satd = hesap.net_hesapla(_uygula(sat))
+        if bolum == "gor":
+            _sekme_gorusme(satd)
+        elif bolum == "b2":
+            _sekme_ikinci(satd)
+        else:
+            _sekme_final(dosya, satd, oz)
 
 
 main()
