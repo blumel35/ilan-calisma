@@ -1,5 +1,6 @@
 """İlan Çalışma Alanı — müşteri dosyalarıyla ilan eleme (Revy Excel → 1. eleme → danışman görüşmesi → 2. eleme → final 3)."""
 import hmac
+import re
 from datetime import date, datetime, timezone
 
 import numpy as np
@@ -239,60 +240,147 @@ def _sekme_ozet(oz, mn_s, mn_k):
 
 
 # ── Sekme: 1. Eleme ────────────────────────────────────────────────────
+def _yas_aralik(v):
+    """Revy bina yaşı metni → (en az, en çok). '0', '5', '6-10', '11-15', '21 ve üzeri' ..."""
+    s = hesap.tr_kucuk(v)
+    m = re.findall(r"\d+", s)
+    if not m:
+        return None, None
+    lo = int(m[0])
+    if len(m) >= 2:
+        return lo, int(m[1])
+    return lo, (None if ("ve üzeri" in s or "+" in s or "üzeri" in s) else lo)
+
+
+def _kat_tipi(v):
+    s = hesap.tr_kucuk(v)
+    if not s:
+        return ""
+    if "çatı" in s or "cati" in s:
+        return "cati"
+    if any(x in s for x in ("zemin", "giriş", "bahçe", "bodrum", "kot", "yüksek giriş")):
+        return "zemin"
+    return "normal"
+
+
 def _filtre_df(sat, anahtar):
-    c = st.columns([2, 2, 1, 1, 2])
-    ilce = c[0].multiselect("İlçe", sorted(sat["ilce"].dropna().unique()), key=f"{anahtar}_ilce")
-    d = sat[sat["ilce"].isin(ilce)] if ilce else sat
-    mah = c[1].multiselect("Mahalle", sorted(d["mahalle"].dropna().unique()), key=f"{anahtar}_mah")
-    fmin = c[2].number_input("Fiyat min (TL)", 0, step=250000, key=f"{anahtar}_fmin")
-    fmax = c[3].number_input("Fiyat max (TL)", 0, step=250000, key=f"{anahtar}_fmax")
-    kul = c[4].multiselect("Kullanım durumu", sorted(sat["kullanim"].dropna().unique()), key=f"{anahtar}_kul")
-    c2 = st.columns([2, 2, 2, 2])
-    gizle = c2[0].checkbox("Aykırı fiyatlıları gizle", key=f"{anahtar}_gizle")
-    alti = c2[1].checkbox("Bölge ort. altındakiler", key=f"{anahtar}_alt")
-    sira = c2[2].selectbox("Sıralama", list(SIRALAMA), key=f"{anahtar}_sira")
-    ara = c2[3].text_input("Ara (başlık, site, ofis)", key=f"{anahtar}_ara")
+    with st.expander("🔎 Filtreler", expanded=True):
+        c = st.columns([2, 2, 1, 1])
+        ilce = c[0].multiselect("İlçe", sorted(sat["ilce"].dropna().unique()), key=f"{anahtar}_ilce")
+        d = sat[sat["ilce"].isin(ilce)] if ilce else sat
+        mah = c[1].multiselect("Mahalle", sorted(d["mahalle"].dropna().unique()), key=f"{anahtar}_mah")
+        fmin = c[2].number_input("Fiyat min (TL)", 0, step=250000, key=f"{anahtar}_fmin")
+        fmax = c[3].number_input("Fiyat max (TL)", 0, step=250000, key=f"{anahtar}_fmax")
+
+        c = st.columns([2, 2, 2, 2])
+        bina = c[0].multiselect("Bina yaşı grubu", ["Yeni (0–10 yaş)", "Eski (11 yaş ve üzeri)"], key=f"{anahtar}_bina",
+                                help="Boş bırakırsan hepsi gelir. 11-15 yaş eski binaya dahildir.")
+        yaslar = sorted(sat["bina_yasi"].dropna().astype(str).unique(), key=lambda x: (_yas_aralik(x)[0] is None, _yas_aralik(x)[0] or 0))
+        yas = c[1].multiselect("Bina yaşı (tam seçim)", yaslar, key=f"{anahtar}_yas")
+        site = c[2].radio("Site içinde", ["Hepsi", "Evet", "Hayır"], horizontal=True, key=f"{anahtar}_site")
+        kul = c[3].multiselect("Kullanım durumu", sorted(sat["kullanim"].dropna().unique()), key=f"{anahtar}_kul")
+
+        c = st.columns([2, 2, 3])
+        cati = c[0].checkbox("Çatı katlarını gizle", value=True, key=f"{anahtar}_cati")
+        zemin = c[1].checkbox("Zemin / giriş / bahçe / bodrum katlarını gizle", value=True, key=f"{anahtar}_zemin")
+        katlar = sorted(sat["kat"].dropna().astype(str).unique(), key=lambda x: (not x.split(".")[0].isdigit(), int(x.split(".")[0]) if x.split(".")[0].isdigit() else 0, x))
+        kat_gizle = c[2].multiselect("Başka kat(lar)ı gizle", katlar, key=f"{anahtar}_katg")
+
+        c = st.columns([2, 2, 2, 2])
+        gizle = c[0].checkbox("Aykırı fiyatlıları gizle", key=f"{anahtar}_gizle")
+        alti = c[1].checkbox("Yalnız bölge ort. altındakiler", key=f"{anahtar}_alt")
+        sira = c[2].selectbox("Sıralama", list(SIRALAMA), key=f"{anahtar}_sira")
+        ara = c[3].text_input("Ara (başlık, site, ofis)", key=f"{anahtar}_ara")
+
+    n0 = len(sat)
+    if ilce:
+        sat = sat[sat["ilce"].isin(ilce)]
     if mah:
-        d = d[d["mahalle"].isin(mah)]
+        sat = sat[sat["mahalle"].isin(mah)]
     if fmin:
-        d = d[d["fiyat"] >= fmin]
+        sat = sat[sat["fiyat"] >= fmin]
     if fmax:
-        d = d[d["fiyat"] <= fmax]
+        sat = sat[sat["fiyat"] <= fmax]
     if kul:
-        d = d[d["kullanim"].isin(kul)]
+        sat = sat[sat["kullanim"].isin(kul)]
     if gizle:
-        d = d[~d["aykiri"]]
+        sat = sat[~sat["aykiri"]]
     if alti:
-        d = d[d["fark_pct"] <= 0]
+        sat = sat[sat["fark_pct"] <= 0]
+    if site != "Hepsi":
+        sat = sat[sat["site_icinde"].fillna("").map(hesap.tr_kucuk) == site.lower()]
+    if yas:
+        sat = sat[sat["bina_yasi"].astype(str).isin(yas)]
+    if bina and len(bina) == 1:
+        ar = sat["bina_yasi"].map(_yas_aralik)
+        yeni = ar.map(lambda t: t[1] is not None and t[1] <= 10)
+        eski = ar.map(lambda t: t[0] is not None and t[0] >= 11)
+        sat = sat[yeni] if bina[0].startswith("Yeni") else sat[eski]
+    tip = sat["kat"].map(_kat_tipi)
+    if cati:
+        sat = sat[tip != "cati"]
+        tip = tip[tip != "cati"]
+    if zemin:
+        sat = sat[tip != "zemin"]
+    if kat_gizle:
+        sat = sat[~sat["kat"].astype(str).isin(kat_gizle)]
     if ara:
         a = ara.lower()
-        d = d[d[["baslik", "site_adi", "ofis", "ilan_sahibi"]].fillna("").agg(" ".join, axis=1).str.lower().str.contains(a, regex=False)]
+        sat = sat[sat[["baslik", "site_adi", "ofis", "ilan_sahibi"]].fillna("").agg(" ".join, axis=1).str.lower().str.contains(a, regex=False)]
     kol, art = SIRALAMA[sira]
-    sig = (tuple(ilce), tuple(mah), fmin, fmax, tuple(kul), gizle, alti, sira, ara)
-    return d.sort_values(kol, ascending=art, na_position="last"), sig
+    sig = (tuple(ilce), tuple(mah), fmin, fmax, tuple(kul), gizle, alti, sira, ara, site, tuple(yas), tuple(bina), cati, zemin, tuple(kat_gizle))
+    return sat.sort_values(kol, ascending=art, na_position="last"), sig
 
 
-def _liste_df(d, secenek):
+def _durum(fark, aykiri):
+    if aykiri:
+        return "⚠ aykırı"
+    if pd.isna(fark):
+        return "—"
+    return "🟢 ucuz" if fark <= -10 else ("🔴 pahalı" if fark >= 10 else "🟡 normal")
+
+
+def _kat_metni(r):
+    k = str(r.get("kat") or "").replace(" Kat", "").replace(".", "").strip()
+    t = r.get("toplam_kat")
+    return f"{k} / {int(t)}" if k and pd.notna(t) else k
+
+
+def _liste_df(d, secenek=None):
     df = pd.DataFrame({
-        "Link": d["url"].values, "İlçe": d["ilce"].values, "Mahalle": d["mahalle"].values, "m²": d["m2"].values,
-        "Fiyat": d["fiyat"].values, "Düşüş %": d["dusus_pct"].values, "m² fiyat": d["m2_fiyat"].values,
-        "Bölge ort. m²": d["ref_ort"].values, "Fark %": d["fark_pct"].values, "Tahmini kira": d["tahmini_kira"].values,
-        "Çarpan (ay)": d["carpan"].values, "Getiri %": d["getiri_pct"].values, "Kullanım": d["kullanim"].values,
-        "Yayın (gün)": d["yayin_suresi"].values, "Ofis / ilan sahibi": d["ofis"].fillna(d["ilan_sahibi"]).values,
-        "Kaynak": d["kaynak"].values, "Aykırı": d["aykiri_yon"].map({"yüksek": "⚠ yüksek", "düşük": "⚠ düşük", "": ""}).values,
+        "Durum": [_durum(f, a) for f, a in zip(d["fark_pct"], d["aykiri"])],
+        "İlan": d["url"].values, "İlçe": d["ilce"].values,
+        "Mahalle": d["mahalle"].fillna("").str.replace(r"\s*Mah\.?$", "", regex=True).values,
+        "m²": d["m2"].values, "Kat": [_kat_metni(r) for _, r in d.iterrows()], "Bina yaşı": d["bina_yasi"].astype(str).replace("nan", "").values,
+        "Fiyat": d["fiyat"].values, "m² fiyat": d["m2_fiyat"].values, "Bölge ort. m²": d["ref_ort"].values, "Fark %": d["fark_pct"].values,
+        "Düşüş %": d["dusus_pct"].values, "Tahmini kira": d["tahmini_kira"].values, "Çarpan (ay)": d["carpan"].values, "Getiri %": d["getiri_pct"].values,
+        "Kullanım": d["kullanim"].values, "Yayın (gün)": d["yayin_suresi"].values,
+        "Ofis / ilan sahibi": d["ofis"].fillna(d["ilan_sahibi"]).values, "Kaynak": d["kaynak"].values,
     }, index=d["id"].values)
+    # veri yoksa boş kolonları gizle (ör. kiralık listesi yüklenmemişse kira/çarpan/getiri)
+    for c in ("Tahmini kira", "Çarpan (ay)", "Getiri %", "Düşüş %", "Yayın (gün)"):
+        if df[c].isna().all() or (c == "Düşüş %" and (df[c].fillna(0) == 0).all()):
+            df = df.drop(columns=c)
     return df
 
 
 def _kolon_ayar():
-    n0 = st.column_config.NumberColumn
+    n = st.column_config.NumberColumn
     return {
-        "Link": st.column_config.LinkColumn("İlan", display_text="aç"),
-        "m²": n0(format="%.0f"), "Fiyat": n0(format="localized"), "Düşüş %": n0(format="%.1f"), "m² fiyat": n0(format="localized"),
-        "Bölge ort. m²": n0(format="localized"), "Fark %": n0(format="%+.1f"), "Tahmini kira": n0(format="localized"),
-        "Çarpan (ay)": n0(format="%.0f"), "Getiri %": n0(format="%.1f"), "Yayın (gün)": n0(format="%.0f"),
-        "Beğen": st.column_config.CheckboxColumn("Beğen ✔", width="small"), "Ele": st.column_config.CheckboxColumn("Ele ✖", width="small"),
-        "Not": st.column_config.TextColumn("Not", width="medium"),
+        "Beğen": st.column_config.CheckboxColumn("✔", help="Beğen", width=50, pinned=True),
+        "Ele": st.column_config.CheckboxColumn("✖", help="Ele", width=50, pinned=True),
+        "Durum": st.column_config.TextColumn("Durum", width=95, help="Bölge ortalamasına göre m² fiyatı: 🟢 %10+ ucuz, 🔴 %10+ pahalı"),
+        "İlan": st.column_config.LinkColumn("İlan", display_text="aç ↗", width=60),
+        "İlçe": st.column_config.TextColumn(width=85), "Mahalle": st.column_config.TextColumn(width=130),
+        "m²": n(format="%.0f", width=55), "Kat": st.column_config.TextColumn(width=65), "Bina yaşı": st.column_config.TextColumn("Yaş", width=55),
+        "Fiyat": n("Fiyat (TL)", format="localized", width=100), "m² fiyat": n("m² fiyat", format="localized", width=85),
+        "Bölge ort. m²": n("Bölge ort.", format="localized", width=85), "Fark %": n("Fark", format="%+.1f%%", width=70),
+        "Düşüş %": n("Düşüş", format="%.1f%%", width=65), "Tahmini kira": n("Tah. kira", format="localized", width=80),
+        "Çarpan (ay)": n("Çarpan", format="%.0f ay", width=75), "Getiri %": n("Getiri", format="%.1f%%", width=70),
+        "Kullanım": st.column_config.TextColumn(width=85), "Yayın (gün)": n("Gün", format="%.0f", width=50),
+        "Ofis / ilan sahibi": st.column_config.TextColumn("Ofis", width=140), "Kaynak": st.column_config.TextColumn(width=90),
+        "Not": st.column_config.TextColumn("Not", width=200),
+        "Geri al": st.column_config.CheckboxColumn("↩", help="Geri al", width=50),
     }
 
 
@@ -305,7 +393,7 @@ def _sekme_birinci(sat, dosya):
         st.caption(f"{len(d)} / {len(aday)} ilan · {int(d['aykiri'].sum())} aykırı fiyatlı (bölge ortalamasına girmez). "
                    "Beğendiklerini ✔, istemediklerini ✖ ile işaretle, sonra Kaydet.")
         ed = _liste_df(d, None)
-        ed.insert(0, "Not", d["not_metni"].fillna("").values)
+        ed["Not"] = d["not_metni"].fillna("").values
         ed.insert(0, "Ele", False)
         ed.insert(0, "Beğen", False)
         disabled = [c for c in ed.columns if c not in ("Beğen", "Ele", "Not")]
@@ -335,9 +423,9 @@ def _sekme_birinci(sat, dosya):
     if not elen.empty:
         with st.expander(f"Elenenler ({len(elen)})"):
             ed2 = _liste_df(elen, None)
-            ed2.insert(0, "Not", elen["not_metni"].fillna("").values)
+            ed2["Not"] = elen["not_metni"].fillna("").values
             ed2.insert(0, "Geri al", False)
-            s2 = st.data_editor(ed2, column_config={**_kolon_ayar(), "Geri al": st.column_config.CheckboxColumn("Geri al ↩", width="small")},
+            s2 = st.data_editor(ed2, column_config=_kolon_ayar(),
                                 disabled=[c for c in ed2.columns if c != "Geri al"], hide_index=True, use_container_width=True,
                                 key=f"ed_elen_{len(ed2)}")
             if st.button("Seçilenleri geri al", key="geri_al"):
@@ -412,7 +500,7 @@ def _sekme_gorusme(sat):
 # ── Sekme: 2. Eleme ────────────────────────────────────────────────────
 def _net_liste(d):
     df = pd.DataFrame({
-        "Link": d["url"].values, "İlçe": d["ilce"].values, "Mahalle": d["mahalle"].values, "m²": d["m2"].values,
+        "İlan": d["url"].values, "İlçe": d["ilce"].values, "Mahalle": d["mahalle"].values, "m²": d["m2"].values,
         "İlan fiyatı": d["fiyat"].values, "Net fiyat": d["fiyat_net"].values, "m² fiyat": d["m2_fiyat_net"].values,
         "Bölge ort. m²": d["ref_ort"].values, "Fark %": d["fark_net"].values, "Aylık kira": d["kira_x"].values,
         "Kira kaynağı": d["kira_kaynak"].values, "Çarpan (ay)": d["carpan_net"].values, "Getiri %": d["getiri_net"].values,
