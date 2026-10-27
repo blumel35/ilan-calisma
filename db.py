@@ -11,7 +11,16 @@ PARCA = 300
 @st.cache_resource
 def _istemci():
     from supabase import create_client
-    return create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
+    url = str(st.secrets.get("SUPABASE_URL", "")).strip().strip('"').strip("'")
+    key = str(st.secrets.get("SUPABASE_KEY", "")).strip().strip('"').strip("'")
+    if not url.startswith("https://") or not url.isascii():
+        st.error("SUPABASE_URL hatalı. Secrets'ta https://....supabase.co biçiminde, düz tırnak içinde olmalı.")
+        st.stop()
+    if len(key) < 40 or not key.isascii() or " " in key:
+        st.error("SUPABASE_KEY hatalı: gerçek anahtar yerine örnek metin, boşluk ya da Türkçe/özel karakter var. "
+                 "Supabase → Project Settings → API Keys → Legacy → service_role → Reveal → Copy ile kopyalayıp Secrets'a yeniden yapıştırın.")
+        st.stop()
+    return create_client(url, key)
 
 
 def dosyalar():
